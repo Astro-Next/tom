@@ -1,6 +1,6 @@
 [project]
 name = "tom"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Triage. Orchestrate. Manage. — An autonomous software development daemon."
 license = "MIT"
 requires-python = ">=3.12"
@@ -15,6 +15,9 @@ tom = "tom.cli:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/tom/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tom"]

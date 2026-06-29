@@ -69,3 +69,9 @@
 - No docstrings unless the function signature is genuinely unclear
 - No comments unless the why is non-obvious
 - Imports: stdlib → third-party → local, separated by blank lines
+
+## Releasing
+
+- Version lives in one place: `__version__` in `src/tom/__init__.py`. `pyproject.toml` derives it via `dynamic = ["version"]` — never put a version there
+- Bump: edit `__version__`, then `uv sync --reinstall-package tom` so installed metadata rebuilds (plain `uv sync` reuses the cache — CLI reads source live, but `importlib.metadata` won't update without a rebuild)
+- Tag the release commit: `git tag -a vX.Y.Z -m "Tom vX.Y.Z"`
