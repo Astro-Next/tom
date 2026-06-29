@@ -50,7 +50,8 @@ Children inherit the parent's type — a `bug` parent produces `bug` children, a
       "description": "...",
       "acceptanceCriteria": ["...", "..."],
       "context": "...",
-      "priority": "p0 | p1 | p2"
+      "priority": "p0 | p1 | p2",
+      "dependsOn": [0, 1]
     }
   ]
 }
@@ -63,6 +64,8 @@ Tom then:
    ```
    Part of #<parent_number>
 
+   Depends on #<sibling>, ...
+
    ## Description
    <description>
 
@@ -74,7 +77,7 @@ Tom then:
    <context>
    ```
 
-   Each child gets labels: `need-dev`, the parent's type, and the child's priority.
+   Each child gets labels: `need-dev`, the parent's type, and the child's priority. `dependsOn` holds sibling indices, which don't have numbers until creation — so Tom creates all children first, then appends the resolved `Depends on #N, ...` line to those that declared one. Children with no dependencies omit the line.
 3. Posts a comment on the parent issue:
 
    ```
@@ -100,5 +103,6 @@ Tom then: labels the issue `blocked` and posts a comment with the reason.
 - **No workflow actions.** The PM agent reads and returns a decision. It never changes labels, creates issues, or comments — Tom does that from the returned decision.
 - **Don't force splitting.** If an issue is one PR of work, triage it as simple — don't create unnecessary parent issues.
 - **Don't create overlapping children.** Each child should touch distinct files/components.
+- **Order dependent children with dependsOn.** When one child needs another's merged code, set its sibling index in `dependsOn`; patrol won't dispatch it until the dependency is closed. Leave it empty otherwise.
 - **Don't create children for things already done.** Check existing issues and PRs before proposing children.
 - **Return `blocked` when in doubt.** If the requirements are too vague to assess scope, escalate rather than guess.

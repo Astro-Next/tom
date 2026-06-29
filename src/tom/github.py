@@ -159,6 +159,10 @@ class GitHubClient:
         resp = await self._request("POST", self._repo_path("/issues"), json=data)
         return resp.json()
 
+    async def update_issue(self, number: int, *, body: str) -> dict:
+        resp = await self._request("PATCH", self._repo_path(f"/issues/{number}"), json={"body": body})
+        return resp.json()
+
     async def close_issue(self, number: int) -> dict:
         resp = await self._request("PATCH", self._repo_path(f"/issues/{number}"), json={"state": "closed"})
         return resp.json()

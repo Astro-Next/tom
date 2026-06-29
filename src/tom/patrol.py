@@ -162,26 +162,40 @@ async def _step1_triage(
 
         elif decision == "parent":
             await client.add_labels(number, ["parent", output["type"], output["priority"]])
+            children = output.get("children", [])
+            child_numbers: list[int] = []
+            child_bodies: list[str] = []
             children_lines = []
-            for child_data in output.get("children", []):
-                child_body = (
-                    f"Part of #{number}\n\n"
-                    f"## Description\n{child_data['description']}\n\n"
-                    f"## Acceptance Criteria\n"
-                )
+            for child_data in children:
+                body_rest = f"## Description\n{child_data['description']}\n\n## Acceptance Criteria\n"
                 for criterion in child_data.get("acceptanceCriteria", []):
-                    child_body += f"- [ ] {criterion}\n"
-                child_body += f"\n## Context\n{child_data['context']}"
+                    body_rest += f"- [ ] {criterion}\n"
+                body_rest += f"\n## Context\n{child_data['context']}"
 
                 child_issue = await client.create_issue(
                     child_data["title"],
-                    child_body,
+                    f"Part of #{number}\n\n{body_rest}",
                     labels=["need-dev", output["type"], child_data["priority"]],
                 )
                 child_number = child_issue["number"]
+                child_numbers.append(child_number)
+                child_bodies.append(body_rest)
                 children_lines.append(
                     f"- [ ] {child_data['priority'].upper()}: #{child_number} — {child_data['title']}"
                 )
+
+            for index, child_data in enumerate(children):
+                deps = [
+                    child_numbers[d]
+                    for d in child_data.get("dependsOn", [])
+                    if 0 <= d < len(children) and d != index
+                ]
+                if deps:
+                    dep_refs = ", ".join(f"#{n}" for n in deps)
+                    await client.update_issue(
+                        child_numbers[index],
+                        body=f"Part of #{number}\n\nDepends on {dep_refs}\n\n{child_bodies[index]}",
+                    )
 
             await client.create_comment(number, "## Children\n\n" + "\n".join(children_lines))
             summary.triaged.append((number, title))
@@ -562,6 +576,18 @@ async def _step5_dispatch_dev(
         title = issue["title"]
         comments = await client.list_comments(number)
 
+        deps = _parse_dependencies(issue.get("body", "") or "")
+        if deps:
+            blocked_dep = False
+            for dep_number in deps:
+                dep = await client.get_issue(dep_number)
+                if dep["state"] != "closed":
+                    blocked_dep = True
+                    break
+            if blocked_dep:
+                _log.debug("Step 5: #%d waiting on unmet dependency, skipping", number)
+                continue
+
         await client.remove_label(number, "need-dev")
         await client.add_labels(number, ["in-dev"])
 
@@ -684,6 +710,13 @@ def _find_last_comment(comments: list[dict], prefix: str) -> dict | None:
 def _extract_pr_number(comment: dict) -> int | None:
     match = re.search(r"#(\d+)", comment.get("body", ""))
     return int(match.group(1)) if match else None
+
+
+def _parse_dependencies(body: str) -> list[int]:
+    match = re.search(r"Depends on ([#\d,\s]+)", body)
+    if not match:
+        return []
+    return [int(n) for n in re.findall(r"#(\d+)", match.group(1))]
 
 
 def _count_failed_dispatches(comments: list[dict], agent_type: str) -> int:

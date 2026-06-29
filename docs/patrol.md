@@ -23,7 +23,7 @@ For each unlabeled issue, invoke the PM agent to triage it. See [PM agent](agent
 
 The PM agent reads the issue, reads project context files (CLAUDE.md, CONVENTIONS.md, docs/), and decides:
 - **Simple issue** (one PR of work) → PM labels it with type (`feature`/`bug`), priority (`p0`/`p1`/`p2`), and `need-dev`
-- **Parent (multiple PRs)** → PM labels it `parent`, creates child issues each labeled `need-dev`
+- **Parent (multiple PRs)** → PM labels it `parent`, creates child issues each labeled `need-dev`. A child that needs another's merged code gets a `Depends on #a, #b` line in its body so step 5 can defer it
 - **Unclear** → PM labels it `blocked` with a comment explaining what's ambiguous
 
 If the PM agent crashes, times out, or returns unparseable output, Tom retries immediately (up to `agent.maxRetries` total attempts). Unlike dev/review, PM runs synchronously and blocks triage of the current issue, so retries happen in a tight loop within the same patrol cycle — there is no label-swap or waiting for the next cycle. If all attempts fail, the issue is labeled `blocked`.
@@ -85,19 +85,21 @@ Query the GitHub API for all open issues labeled `need-dev`.
 
 For each issue, in priority order:
 
-1. **Check dev quota:** count open issues labeled `in-dev`. If at or above `dev.concurrent`, stop dispatching — remaining issues stay in `need-dev`.
+1. **Check dependencies:** if the body has a `Depends on #a, #b` line, query each referenced issue. If any is not closed, skip — the child stays `need-dev` and is re-checked next cycle. A skipped child consumes no quota.
 
-2. **Read context:** read the issue comments. The issue may be returning from `blocked` (human added instructions) or from a review cycle (changes requested). The latest comments provide context for the dev agent.
+2. **Check dev quota:** count open issues labeled `in-dev`. If at or above `dev.concurrent`, stop dispatching — remaining issues stay in `need-dev`.
 
-3. **Swap labels:** remove `need-dev`, add `in-dev`.
+3. **Read context:** read the issue comments. The issue may be returning from `blocked` (human added instructions) or from a review cycle (changes requested). The latest comments provide context for the dev agent.
 
-4. **Set up the worktree:** decide new work vs. re-dispatch from the issue comments.
+4. **Swap labels:** remove `need-dev`, add `in-dev`.
+
+5. **Set up the worktree:** decide new work vs. re-dispatch from the issue comments.
    - **No `dev completed: PR #N` comment** → new work. Create branch `dev/{issue_number}-{slug}` from `origin/{default-branch}` and a worktree at `.worktrees/dev-{issue_number}`.
    - **A `dev completed: PR #N` comment exists** → re-dispatch. Take the PR number from the most recent such comment, query the PR for its head branch, fetch it, and create the worktree on that branch — no new branch.
 
-5. **Spawn dev agent:** invoke Claude Code with the dev prompt in the worktree. See [Dev agent](agents/dev.md) for the full process.
+6. **Spawn dev agent:** invoke Claude Code with the dev prompt in the worktree. See [Dev agent](agents/dev.md) for the full process.
 
-6. **Post tracking comment on the issue:**
+7. **Post tracking comment on the issue:**
    ```
    dispatched dev
    Process: <pid>

@@ -259,7 +259,8 @@ Needs multiple PRs (children inherit the parent's type):
       "description": "What to implement",
       "acceptanceCriteria": ["...", "..."],
       "context": "Relevant files, patterns, or conventions",
-      "priority": "p0 | p1 | p2"
+      "priority": "p0 | p1 | p2",
+      "dependsOn": [0, 1]
     }
   ]
 }
@@ -274,6 +275,7 @@ Cannot be assessed — requirements too vague:
 Rules:
 - Don't force splitting — if it's one PR, return need-dev.
 - Children must not overlap — each touches distinct files/components.
+- dependsOn lists the indices of siblings in the children array a child must wait for — set it only when a child needs another's merged code; omit it otherwise. Dispatch is ordered, not parallel, for dependent children.
 - Don't propose children for work already done — check existing issues and PRs first.
 - When scope is genuinely unclear, return blocked rather than guessing.
 ```

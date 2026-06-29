@@ -20,6 +20,10 @@ PM_SCHEMA = {
                         "type": "string",
                         "enum": ["p0", "p1", "p2"],
                     },
+                    "dependsOn": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                    },
                 },
                 "required": [
                     "title",

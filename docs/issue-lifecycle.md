@@ -129,13 +129,16 @@ When the PM agent triages an issue as requiring multiple PRs, it:
 
 ### Child issue format
 
-Each child issue body starts with `Part of #N` (referencing the parent issue number), followed by a description, acceptance criteria, and context.
+Each child issue body starts with `Part of #N` (referencing the parent issue number), followed by a description, acceptance criteria, and context. A child that needs another child's merged code also carries a `Depends on #a, #b` line — patrol skips dispatching it until those issues are closed.
 
 ### Linking
 
 GitHub lacks native issue hierarchy. Tom uses text references:
 - Child issue body: `Part of #{parent_number}`
+- Child issue body: `Depends on #{sibling_number}, ...` (only when the child depends on siblings)
 - Epic comment: numbered list of `#{child_number}` references
+
+The PM agent names dependencies by sibling index, since child numbers don't exist yet at triage. Tom creates the children first, then resolves the indices to real numbers and appends the `Depends on` line. Priority controls dispatch order; dependencies block dispatch.
 
 ### Auto-close
 

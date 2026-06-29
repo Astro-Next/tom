@@ -10,8 +10,10 @@ from tom.patrol import (
     _count_failed_dispatches,
     _find_comment,
     _find_last_comment,
+    _parse_dependencies,
     _sort_by_priority,
     _step1_triage,
+    _step5_dispatch_dev,
     _step6_check_parents,
     _step7_cleanup,
 )
@@ -284,6 +286,44 @@ class TestStep1Triage:
         assert len(summary.triaged) == 1
 
     @pytest.mark.asyncio
+    async def test_triage_parent_appends_depends_on(self):
+        settings = _make_settings()
+        summary = PatrolSummary()
+
+        client = AsyncMock()
+        client.list_issues = AsyncMock(return_value=[_make_issue(42, "Big feature")])
+        client.list_comments = AsyncMock(return_value=[])
+        client._token = "fake-token"
+        client.create_issue = AsyncMock(side_effect=[
+            {"number": 43},
+            {"number": 44},
+        ])
+
+        with patch("tom.patrol.download_attachments", new_callable=AsyncMock), \
+             patch("tom.patrol._git", new_callable=AsyncMock), \
+             patch("tom.patrol.spawn_agent") as mock_spawn, \
+             patch("tom.patrol.await_agent") as mock_await:
+            mock_proc = AsyncMock()
+            mock_proc.pid = 12345
+            mock_spawn.return_value = mock_proc
+            from tom.agents import AgentSuccess
+            mock_await.return_value = AgentSuccess(output={
+                "decision": "parent",
+                "type": "feature",
+                "priority": "p1",
+                "children": [
+                    {"title": "A", "description": "d", "acceptanceCriteria": ["a"], "context": "c", "priority": "p0"},
+                    {"title": "B", "description": "d", "acceptanceCriteria": ["a"], "context": "c", "priority": "p1", "dependsOn": [0]},
+                ],
+            })
+
+            await _step1_triage(settings, "/tmp/test", "main", client, summary)
+
+        client.update_issue.assert_called_once()
+        assert client.update_issue.call_args.args[0] == 44
+        assert "Depends on #43" in client.update_issue.call_args.kwargs["body"]
+
+    @pytest.mark.asyncio
     async def test_skips_labeled_issues(self):
         settings = _make_settings()
         summary = PatrolSummary()
@@ -353,6 +393,61 @@ class TestStep1Triage:
         client.add_labels.assert_called_with(42, ["need-dev", "bug", "p1"])
         assert len(summary.triaged) == 1
         assert len(summary.blocked) == 0
+
+
+class TestStep5DispatchDev:
+    @pytest.mark.asyncio
+    async def test_dispatch_dev_skips_unmet_dependency(self):
+        settings = _make_settings()
+        summary = PatrolSummary()
+
+        child = _make_issue(44, "Dependent", ["need-dev"])
+        child["body"] = "Part of #42\n\nDepends on #43\n\nwork"
+        client = AsyncMock()
+        client.list_issues = AsyncMock(return_value=[child])
+        client.get_issue = AsyncMock(return_value=_make_issue(43, "Dep", state="open"))
+
+        await _step5_dispatch_dev(settings, "/tmp/test", "main", client, {}, summary)
+
+        client.add_labels.assert_not_called()
+        assert summary.dev_dispatched == []
+
+    @pytest.mark.asyncio
+    async def test_dispatch_dev_proceeds_when_dependency_closed(self):
+        settings = _make_settings()
+        summary = PatrolSummary()
+
+        child = _make_issue(44, "Dependent", ["need-dev"])
+        child["body"] = "Part of #42\n\nDepends on #43\n\nwork"
+        client = AsyncMock()
+        client.list_issues = AsyncMock(side_effect=[[child], []])
+        client.get_issue = AsyncMock(return_value=_make_issue(43, "Dep", state="closed"))
+        client.list_comments = AsyncMock(return_value=[])
+        client._token = "fake-token"
+
+        with patch("tom.patrol.download_attachments", new_callable=AsyncMock), \
+             patch("tom.patrol.fetch_origin", new_callable=AsyncMock), \
+             patch("tom.patrol.create_dev_worktree", new_callable=AsyncMock) as mock_wt, \
+             patch("tom.patrol.spawn_agent") as mock_spawn:
+            mock_wt.return_value = "/tmp/test/.worktrees/dev-44"
+            mock_proc = AsyncMock()
+            mock_proc.pid = 999
+            mock_spawn.return_value = mock_proc
+            await _step5_dispatch_dev(settings, "/tmp/test", "main", client, {}, summary)
+
+        client.add_labels.assert_any_call(44, ["in-dev"])
+        assert summary.dev_dispatched == [(44, "Dependent")]
+
+
+class TestParseDependencies:
+    def test_no_dependency(self):
+        assert _parse_dependencies("Part of #42\n\nwork") == []
+
+    def test_single(self):
+        assert _parse_dependencies("Part of #42\n\nDepends on #43\n\nwork") == [43]
+
+    def test_multiple(self):
+        assert _parse_dependencies("Depends on #43, #44, #45") == [43, 44, 45]
 
 
 class TestStep6Parents:
