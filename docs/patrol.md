@@ -38,11 +38,13 @@ For each issue, read the issue comments looking for the review agent's completio
 
 - **`merged PR #N`** — the PR was merged. If the issue is still open (auto-close didn't fire), close it. Remove the `in-review` label.
 - **`review result: changes-requested`** — remove `in-review`, add `need-dev`. The issue will be re-dispatched to dev in step 4 of this cycle or the next.
-- **No completion comment found** — check if the review subprocess is still running:
+- **No completion comment found, a subprocess is tracked** — check if the review subprocess is still running:
   - **Still running, within `agent.timeout`** → skip, check next cycle
   - **Still running, exceeded `agent.timeout`** → terminate the process, treat as a Tom-detected failure (same logic as "crashed" below)
   - **Exited with `status: failure`** → the agent ran but could not review (for example the PR is empty or the linked issue is missing). Remove `in-review`, add `blocked`, post a `Blocked:` comment with the agent's `failureReason`. This does **not** count as a failed dispatch — it is an agent-declared failure that retrying would not fix (see [Architecture — Agent failure model](architecture.md#agent-failure-model)).
+  - **Exited successfully, but applying the result fails** → the agent returned a verdict, but a GitHub API call while posting the review, merging, or closing errors. Remove `in-review`, add `blocked`, post a `Blocked:` comment with the API error detail. This blocks immediately rather than retrying. (A merge rejected with 405/409 is handled separately: the issue returns to `need-dev` for another dev pass — see [`merge failed`](#comment-conventions).)
   - **Crashed, timed out, or returned unparseable output** → Tom-detected failure. Count total failed review dispatches for this issue (dispatch comments not followed by a completion comment). If under `agent.maxRetries`, remove `in-review`, add `need-review` (will be re-dispatched). If at limit, add `blocked`, post a `Blocked:` comment with Tom's reason (what failed, attempt count; details in tom.log).
+- **No completion comment found, no subprocess tracked** — the dispatch was interrupted (typically a daemon restart that killed the agent). If the `dispatched review for PR #N` comment is older than `agent.timeout`, remove `in-review`, add `blocked`, post a `Blocked:` comment with a best-effort state report (whether an open PR references the issue, whether the local worktree is present). This blocks immediately and does not retry. If the dispatch is still within `agent.timeout`, skip and re-check next cycle.
 
 ## Step 3: Check dev progress
 
@@ -51,11 +53,13 @@ Query the GitHub API for all open issues labeled `in-dev`.
 For each issue, read the issue comments looking for the dev agent's completion signal:
 
 - **`dev completed: PR #N`** — remove `in-dev`, add `need-review`.
-- **No completion comment found** — check the dev subprocess:
+- **No completion comment found, a subprocess is tracked** — check the dev subprocess:
   - **Still running, within `agent.timeout`** → skip, check next cycle
   - **Still running, exceeded `agent.timeout`** → terminate the process, treat as a Tom-detected failure (same logic as "crashed" below)
   - **Exited with `status: failure`** → the agent read the issue but could not proceed (ambiguous requirements). Remove `in-dev`, add `blocked`, post a `Blocked:` comment with the agent's `failureReason`. This does **not** count as a failed dispatch — it is an agent-declared failure that retrying would not fix (see [Architecture — Agent failure model](architecture.md#agent-failure-model)).
+  - **Exited successfully, but finalizing the result fails** → the agent succeeded, but a GitHub API call while pushing or creating/updating the PR errors (for example a 422 when the branch has no diff). Remove `in-dev`, add `blocked`, post a `Blocked:` comment with the API error detail. The finalize is not safely repeatable, so this blocks immediately rather than retrying.
   - **Crashed, timed out, or returned unparseable output** → Tom-detected failure. Count failed dev dispatches. If under `agent.maxRetries`, remove `in-dev`, add `need-dev`. If at limit, add `blocked`, post a `Blocked:` comment with Tom's reason (what failed, attempt count; details in tom.log).
+- **No completion comment found, no subprocess tracked** — the dispatch was interrupted (typically a daemon restart that killed the agent). If the `dispatched dev` comment is older than `agent.timeout`, the agent is gone: remove `in-dev`, add `blocked`, post a `Blocked:` comment with a best-effort state report (whether an open PR references the issue, whether the local worktree is present) so a human can recover. This blocks immediately and does not retry. If the dispatch is still within `agent.timeout`, skip and re-check next cycle.
 
 ## Step 4: Dispatch review agents
 
@@ -158,7 +162,7 @@ Agents return structured JSON; Tom posts the comments and acts on the results.
 | `triaging` | Step 1 | Tracks PM agent dispatch. Includes process ID. |
 | `dispatched dev` | Step 5 | Tracks dev agent dispatch. Includes process ID. |
 | `dispatched review for PR #N` | Step 4 | Tracks review agent dispatch. Includes process ID. |
-| `Blocked: ...` | Steps 1, 2, or 3 | Explains why an issue was escalated and what the human needs to decide. The reason is the agent's (an agent-declared `failure`/`blocked`) or Tom's own (retries exhausted on a crash/timeout/parse failure). See [Architecture — Agent failure model](architecture.md#agent-failure-model). |
+| `Blocked: ...` | Steps 1, 2, or 3 | Explains why an issue was escalated and what the human needs to decide. The reason is the agent's (an agent-declared `failure`/`blocked`), Tom's own (retries exhausted on a crash/timeout/parse failure), a GitHub API error detail (finalizing a successful agent's result failed), or a state report (the dispatch was orphaned past `agent.timeout`). See [Architecture — Agent failure model](architecture.md#agent-failure-model). |
 | `dev completed: PR #N` | Step 3, after dev agent returns success | Signals dev completion. Posted by Tom after committing, pushing, and creating/updating the PR. |
 | `review result: approved` | Step 2, after review agent returns approved | Signals review approval. Posted by Tom after posting the review on the PR. |
 | `merged PR #N` | Step 2, after successful merge | Confirms the PR was merged. Posted by Tom after merging, deleting the branch, and closing the issue. |

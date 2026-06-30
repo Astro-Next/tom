@@ -73,20 +73,24 @@ Subprocesses are spawned with `asyncio.create_subprocess_exec` and tracked as as
 
 ## Agent failure model
 
-Every agent shares one output contract: it returns structured JSON describing a result, and Tom executes all side effects. An agent run ends in one of three ways, and only one of them retries.
+Every agent shares one output contract: it returns structured JSON describing a result, and Tom executes all side effects. An issue's progression can stall in one of a few ways — in how the agent run ends, or in Tom's own execution after a usable result — and only one of them retries.
 
 **1. A usable result.** The agent returns valid JSON describing what it accomplished — a triage decision, a PR to create, a verdict, or a retro issue. Tom acts on it. This includes results that ask for a human without being failures:
 
 - **PM `decision: "blocked"`** — the agent triaged the issue and decided it needs a human (requirements too vague to scope). A valid decision, not a crash.
 - **Analyst `hasFindings: false`** — the agent analyzed the window and found nothing worth raising. A clean round, not a crash.
 
+Acting on a usable result can itself fail. When Tom posts a dev or review agent's outcome — creating or updating the PR, posting the result comment, merging — a GitHub API call may error (for example, a 422 when the agent produced no diff to open a PR against). The agent's work is already done and the finalizing steps are not safely repeatable, so **Tom blocks the issue immediately rather than retrying**, and the `Blocked:` comment carries the API status and error detail. The label transition runs before the comment, so a failure while commenting cannot strand the issue.
+
 **2. An agent-declared failure.** The agent ran fine, understood the task well enough to know it cannot produce a normal result, and says so: `status: "failure"` with a `failureReason` (dev and review agents), or `decision: "blocked"` with a `reason` (PM). Retrying would hit the same wall — the same prompt against the same unchanged input fails the same way — so **Tom blocks the issue immediately, without retrying**, and posts the agent's reason in the `Blocked:` comment so the human sees exactly what the agent could not resolve.
 
 **3. A Tom-detected failure.** The subprocess crashed, exited non-zero, exceeded `agent.timeout`, or returned output that does not validate against the schema. This bucket covers the common environment failures — a broken or unauthenticated `claude` install, an unreachable model server, a network timeout — all of which surface as a non-zero exit or a process that never responds. Tom cannot tell whether any work is salvageable or what the agent intended, so it treats the run as a failed dispatch: **retry up to `agent.maxRetries`, then block.** The block comment carries Tom's reason (what failed and how many attempts were made), since there is no agent reason to quote.
 
+**4. An orphaned dispatch.** A dev or review agent was dispatched, but no subprocess is tracked for the issue, no completion comment exists, and the `dispatched` comment is older than `agent.timeout`. This is what a daemon restart mid-agent leaves behind: the killed subprocess and its in-memory timeout timer are gone, so case 3's enforcement never fires. Tom derives the deadline instead from the dispatch comment's timestamp — a durable signal that survives the restart — and once it is exceeded, **blocks the issue immediately, without retrying**, attaching a best-effort state report (whether an open PR references the issue, whether the local worktree is present) so a human can recover any partial work. Tom does not attempt automatic recovery: after an arbitrary kill it cannot reliably tell how far the interrupted finalize got, so it surfaces the state and escalates.
+
 Tom is the layer that runs the subprocess, so it captures what the subprocess reported and writes it to `tom.log`: the exit code and a short tail of stderr (or "timed out" / "unparseable output"). The `Blocked:` comment summarizes it briefly and points to the log. Tom records what the subprocess surfaced — it does not attempt to diagnose *why* Claude Code failed beyond that.
 
-**Every block carries a reason, from one of two sources:** the agent's reason (case 2) or Tom's own (case 3). The reason only reaches the human because Tom writes it into the issue comment — the agent's JSON is consumed by Tom and never posted on its own.
+**Every block carries a reason:** the agent's own reason (case 2), Tom's summary of what failed (case 3), the GitHub API detail when finalizing a result fails (case 1), or the orphan state report (case 4). The reason only reaches the human because Tom writes it into the issue comment — the agent's JSON is consumed by Tom and never posted on its own.
 
 A malformed-JSON run (case 3) is worth one caveat: a dev agent might have written real code but botched its final JSON. Tom discards that run and the next retry starts from a fresh worktree, so the partial work is lost. This is an accepted tradeoff — Tom cannot trust or act on a result it cannot parse, and a clean retry is more predictable than salvaging an unverifiable working tree.
 

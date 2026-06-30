@@ -77,12 +77,12 @@ blocked → (human removes label) → re-enters workflow at previous state
 | `need-dev` | `in-dev` | Dev agent dispatched | Patrol |
 | `in-dev` | `need-review` | Dev agent returned success, Tom posted `dev completed: PR #N` | Patrol |
 | `in-dev` | `need-dev` | Dev dispatch crashed/timed out, retries remaining | Patrol |
-| `in-dev` | `blocked` | Dev returned `status: failure` (immediate), or dispatch failed at max retries | Patrol |
+| `in-dev` | `blocked` | Dev returned `status: failure`, finalizing the PR failed, or the dispatch was orphaned past `agent.timeout` (immediate); or dispatch failed at max retries | Patrol |
 | `need-review` | `in-review` | Review agent dispatched | Patrol |
 | `in-review` | closed | Review agent returned approved, Tom merged PR | Patrol |
 | `in-review` | `need-dev` | Review agent returned changes-requested | Patrol |
 | `in-review` | `need-review` | Review dispatch crashed/timed out, retries remaining | Patrol |
-| `in-review` | `blocked` | Review returned `status: failure` (immediate), or dispatch failed at max retries | Patrol |
+| `in-review` | `blocked` | Review returned `status: failure`, applying the result failed, or the dispatch was orphaned past `agent.timeout` (immediate); or dispatch failed at max retries | Patrol |
 | (open, no workflow label) | `blocked` | PM returned `decision: blocked` (requirements too vague) | Patrol |
 | `blocked` | (re-enters workflow) | Human removes `blocked` label | Human |
 | `parent` | closed | All child issues are closed | Patrol |
@@ -93,12 +93,14 @@ When transitioning between workflow labels, Tom always removes the old label and
 
 ## Escalation and blocking
 
-An issue is labeled `blocked` in two situations, which differ in whether they retry first (see [Architecture — Agent failure model](architecture.md#agent-failure-model)):
+An issue is labeled `blocked` in four situations, which differ in whether they retry first (see [Architecture — Agent failure model](architecture.md#agent-failure-model)):
 
 1. **Agent-declared failure (no retry).** An agent ran successfully but reported it cannot proceed — the PM returns `decision: "blocked"`, or a dev or review agent returns `status: "failure"`. Retrying the same prompt against the same input would fail identically, so Tom blocks immediately. This covers unclear requirements, a decision no one has made, and external dependencies — whatever the agent named in its reason.
 2. **Tom-detected failure, retries exhausted.** A dev or review subprocess crashed, timed out, or returned unparseable output `agent.maxRetries` times. Each is a failed dispatch; at the limit, Tom blocks. Normal review cycles (changes-requested followed by re-dev) are not failed dispatches.
+3. **Finalization failure (no retry).** A dev or review agent returned success, but a GitHub API call while Tom posts the result — pushing, creating or updating the PR, merging, closing — errors (for example a 422 when the agent produced no diff). The agent's work is done and the finalizing steps are not safely repeatable, so Tom blocks immediately with the API error detail.
+4. **Orphaned dispatch (no retry).** A dispatch left no completion comment and has no tracked subprocess, and its `dispatched` comment is older than `agent.timeout` — what a daemon restart mid-agent leaves behind. Tom blocks immediately with a best-effort state report (whether an open PR references the issue, whether the local worktree is present) so a human can recover any partial work.
 
-When adding `blocked`, Tom posts a `Blocked:` comment with the reason: the agent's own reason for case 1, or Tom's summary (what failed and the attempt count) for case 2. The reason reaches the human only because Tom writes it into the comment.
+When adding `blocked`, Tom posts a `Blocked:` comment with the reason: the agent's own reason (case 1), Tom's summary of what failed and the attempt count (case 2), the GitHub API error detail (case 3), or the orphan state report (case 4). The reason reaches the human only because Tom writes it into the comment.
 
 **Resolving blocked issues:** A human removes the `blocked` label. On the next patrol, Tom reads the latest comments for context (the human may have added clarifying instructions) and re-enters the issue into the workflow. If the issue had a workflow label before being blocked, it returns to that state. If not, it goes through triage again.
 
