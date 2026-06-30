@@ -312,39 +312,48 @@ async def _step2_check_review_progress(
 
         review_body = output.get("comment") or "No comment."
 
-        if verdict == "approved":
-            await client.create_comment(pr_number, review_body)
-            await client.create_comment(number, "review result: approved")
+        try:
+            if verdict == "approved":
+                await client.create_comment(pr_number, review_body)
+                await client.create_comment(number, "review result: approved")
 
-            pr = await client.get_pr(pr_number)
-            try:
-                await client.merge_pr(pr_number)
-            except httpx.HTTPStatusError as exc:
-                status = exc.response.status_code
-                detail = exc.response.text
-                _log.warning("Merge failed for PR #%d (issue #%d): %s", pr_number, number, detail)
-                await client.create_comment(pr_number, f"merge failed ({status}): {detail}")
-                await client.create_comment(number, f"merge failed: PR #{pr_number} — {status} {detail}")
+                pr = await client.get_pr(pr_number)
+                try:
+                    await client.merge_pr(pr_number)
+                except httpx.HTTPStatusError as exc:
+                    status = exc.response.status_code
+                    detail = exc.response.text
+                    _log.warning("Merge failed for PR #%d (issue #%d): %s", pr_number, number, detail)
+                    await client.create_comment(pr_number, f"merge failed ({status}): {detail}")
+                    await client.create_comment(number, f"merge failed: PR #{pr_number} — {status} {detail}")
+                    await client.remove_label(number, "in-review")
+                    if status in (405, 409):
+                        await client.add_labels(number, ["need-dev"])
+                    else:
+                        await client.add_labels(number, ["blocked"])
+                        summary.blocked.append((number, title))
+                    continue
+
+                if issue["state"] == "open":
+                    await client.close_issue(number)
                 await client.remove_label(number, "in-review")
-                if status in (405, 409):
-                    await client.add_labels(number, ["need-dev"])
-                else:
-                    await client.add_labels(number, ["blocked"])
-                    summary.blocked.append((number, title))
-                continue
+                await client.delete_branch(pr["head"]["ref"])
+                await client.create_comment(number, f"merged PR #{pr_number}")
+                summary.completed.append((number, title))
 
-            if issue["state"] == "open":
-                await client.close_issue(number)
+            elif verdict == "changes-requested":
+                await client.create_comment(pr_number, review_body)
+                await client.remove_label(number, "in-review")
+                await client.add_labels(number, ["need-dev"])
+                await client.create_comment(number, "review result: changes-requested")
+        except Exception as exc:
+            detail = _exception_detail(exc)
+            _log.exception("Applying review result failed for #%d", number)
             await client.remove_label(number, "in-review")
-            await client.delete_branch(pr["head"]["ref"])
-            await client.create_comment(number, f"merged PR #{pr_number}")
-            summary.completed.append((number, title))
-
-        elif verdict == "changes-requested":
-            await client.create_comment(pr_number, review_body)
-            await client.remove_label(number, "in-review")
-            await client.add_labels(number, ["need-dev"])
-            await client.create_comment(number, "review result: changes-requested")
+            await client.add_labels(number, ["blocked"])
+            await _try_comment(client, number, f"Blocked: applying review result failed — {detail}")
+            summary.blocked.append((number, title))
+            continue
 
 
 # --- Step 3: Check dev progress ---
@@ -457,24 +466,33 @@ async def _step3_check_dev_progress(
                 pass
 
         pr_comment = _find_last_comment(comments, "dev completed: PR #")
-        if pr_comment:
-            existing_pr = _extract_pr_number(pr_comment)
-            if existing_pr:
-                await client.update_pr(existing_pr, body=output.get("prBody", ""))
+        try:
+            if pr_comment:
+                existing_pr = _extract_pr_number(pr_comment)
+                if existing_pr:
+                    await client.update_pr(existing_pr, body=output.get("prBody", ""))
+                    if output.get("comment"):
+                        await client.create_comment(existing_pr, output["comment"])
+                    await client.create_comment(number, f"dev completed: PR #{existing_pr}")
+            else:
+                default_branch = await client.get_default_branch()
+                pr = await client.create_pr(
+                    output.get("prTitle", f"Fix #{number}"),
+                    output.get("prBody", f"Closes #{number}"),
+                    branch_name,
+                    default_branch,
+                )
                 if output.get("comment"):
-                    await client.create_comment(existing_pr, output["comment"])
-                await client.create_comment(number, f"dev completed: PR #{existing_pr}")
-        else:
-            default_branch = await client.get_default_branch()
-            pr = await client.create_pr(
-                output.get("prTitle", f"Fix #{number}"),
-                output.get("prBody", f"Closes #{number}"),
-                branch_name,
-                default_branch,
-            )
-            if output.get("comment"):
-                await client.create_comment(pr["number"], output["comment"])
-            await client.create_comment(number, f"dev completed: PR #{pr['number']}")
+                    await client.create_comment(pr["number"], output["comment"])
+                await client.create_comment(number, f"dev completed: PR #{pr['number']}")
+        except Exception as exc:
+            detail = _exception_detail(exc)
+            _log.exception("PR creation failed for #%d", number)
+            await client.remove_label(number, "in-dev")
+            await client.add_labels(number, ["blocked"])
+            await _try_comment(client, number, f"Blocked: PR creation failed — {detail}")
+            summary.blocked.append((number, title))
+            continue
 
         await client.remove_label(number, "in-dev")
         await client.add_labels(number, ["need-review"])
@@ -710,6 +728,19 @@ def _find_last_comment(comments: list[dict], prefix: str) -> dict | None:
 def _extract_pr_number(comment: dict) -> int | None:
     match = re.search(r"#(\d+)", comment.get("body", ""))
     return int(match.group(1)) if match else None
+
+
+def _exception_detail(exc: Exception) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"{exc.response.status_code} {exc.response.text}"
+    return str(exc)
+
+
+async def _try_comment(client: GitHubClient, number: int, body: str) -> None:
+    try:
+        await client.create_comment(number, body)
+    except Exception:
+        _log.exception("Failed to post comment on #%d (continuing)", number)
 
 
 def _parse_dependencies(body: str) -> list[int]:
