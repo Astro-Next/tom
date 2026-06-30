@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -7,12 +8,15 @@ import pytest
 from tom.models import Settings, PatrolSettings, RetroSettings, AgentSettings, DevSettings, ReviewSettings
 from tom.patrol import (
     PatrolSummary,
+    _comment_age_exceeds,
     _count_failed_dispatches,
     _find_comment,
     _find_last_comment,
     _parse_dependencies,
     _sort_by_priority,
     _step1_triage,
+    _step2_check_review_progress,
+    _step3_check_dev_progress,
     _step5_dispatch_dev,
     _step6_check_parents,
     _step7_cleanup,
@@ -501,3 +505,104 @@ class TestStep7Cleanup:
         await _step7_cleanup(client)
 
         client.remove_label.assert_called_with(1, "in-review")
+
+
+def _dispatch_comment(prefix: str, *, age_minutes: float) -> dict:
+    ts = datetime.now(timezone.utc) - timedelta(minutes=age_minutes)
+    return {"body": f"{prefix}\nProcess: 1718", "created_at": ts.isoformat().replace("+00:00", "Z")}
+
+
+class TestCommentAge:
+    def test_stale_comment_exceeds(self):
+        c = _dispatch_comment("dispatched dev", age_minutes=60)
+        assert _comment_age_exceeds(c, 1800) is True
+
+    def test_fresh_comment_within(self):
+        c = _dispatch_comment("dispatched dev", age_minutes=1)
+        assert _comment_age_exceeds(c, 1800) is False
+
+    def test_missing_timestamp(self):
+        assert _comment_age_exceeds({"body": "dispatched dev"}, 1800) is False
+
+    def test_malformed_timestamp(self):
+        assert _comment_age_exceeds({"created_at": "not-a-date"}, 1800) is False
+
+
+class TestStep3Orphan:
+    @pytest.mark.asyncio
+    async def test_stale_orphan_blocks(self):
+        settings = _make_settings()
+        summary = PatrolSummary()
+        client = AsyncMock()
+        client.list_issues = AsyncMock(return_value=[_make_issue(13, "Stuck", ["in-dev"])])
+        client.list_comments = AsyncMock(return_value=[_dispatch_comment("dispatched dev", age_minutes=120)])
+        client.search_issues = AsyncMock(return_value=[])
+
+        await _step3_check_dev_progress(settings, "/repo", client, {}, summary)
+
+        client.remove_label.assert_any_call(13, "in-dev")
+        client.add_labels.assert_any_call(13, ["blocked"])
+        assert (13, "Stuck") in summary.blocked
+        body = client.create_comment.call_args.args[1]
+        assert body.startswith("Blocked: dev agent produced no result")
+
+    @pytest.mark.asyncio
+    async def test_fresh_orphan_skips(self):
+        settings = _make_settings()
+        summary = PatrolSummary()
+        client = AsyncMock()
+        client.list_issues = AsyncMock(return_value=[_make_issue(13, "Recent", ["in-dev"])])
+        client.list_comments = AsyncMock(return_value=[_dispatch_comment("dispatched dev", age_minutes=1)])
+
+        await _step3_check_dev_progress(settings, "/repo", client, {}, summary)
+
+        client.add_labels.assert_not_called()
+        assert summary.blocked == []
+
+    @pytest.mark.asyncio
+    async def test_probe_failure_still_blocks(self):
+        settings = _make_settings()
+        summary = PatrolSummary()
+        client = AsyncMock()
+        client.list_issues = AsyncMock(return_value=[_make_issue(13, "Stuck", ["in-dev"])])
+        client.list_comments = AsyncMock(return_value=[_dispatch_comment("dispatched dev", age_minutes=120)])
+        client.search_issues = AsyncMock(side_effect=RuntimeError("API down"))
+
+        await _step3_check_dev_progress(settings, "/repo", client, {}, summary)
+
+        client.add_labels.assert_any_call(13, ["blocked"])
+        assert (13, "Stuck") in summary.blocked
+
+    @pytest.mark.asyncio
+    async def test_comment_failure_still_blocks(self):
+        settings = _make_settings()
+        summary = PatrolSummary()
+        client = AsyncMock()
+        client.list_issues = AsyncMock(return_value=[_make_issue(13, "Stuck", ["in-dev"])])
+        client.list_comments = AsyncMock(return_value=[_dispatch_comment("dispatched dev", age_minutes=120)])
+        client.search_issues = AsyncMock(return_value=[])
+        client.create_comment = AsyncMock(side_effect=RuntimeError("rate limited"))
+
+        await _step3_check_dev_progress(settings, "/repo", client, {}, summary)
+
+        client.add_labels.assert_any_call(13, ["blocked"])
+        assert (13, "Stuck") in summary.blocked
+
+
+class TestStep2Orphan:
+    @pytest.mark.asyncio
+    async def test_stale_review_orphan_blocks(self):
+        settings = _make_settings()
+        summary = PatrolSummary()
+        client = AsyncMock()
+        client.list_issues = AsyncMock(return_value=[_make_issue(13, "Stuck", ["in-review"])])
+        client.list_comments = AsyncMock(
+            return_value=[_dispatch_comment("dispatched review for PR #20", age_minutes=120)]
+        )
+        client.search_issues = AsyncMock(return_value=[])
+
+        await _step2_check_review_progress(settings, "/repo", client, {}, summary)
+
+        client.remove_label.assert_any_call(13, "in-review")
+        client.add_labels.assert_any_call(13, ["blocked"])
+        assert (13, "Stuck") in summary.blocked

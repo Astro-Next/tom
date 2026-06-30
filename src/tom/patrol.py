@@ -5,7 +5,7 @@ import json
 import logging
 import re
 import signal
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -245,6 +245,25 @@ async def _step2_check_review_progress(
 
         entry = active_processes.get(number)
         if entry is None:
+            # No live process (e.g. daemon restarted mid-agent) and no result
+            # comment. If the dispatch is older than the agent timeout, the agent
+            # is gone — surface it as blocked rather than skip forever.
+            grace = parse_interval_seconds(settings.agent.timeout)
+            if last_dispatch and _comment_age_exceeds(last_dispatch, grace):
+                _log.warning("Step 2: #%d orphaned in-review (no process, no result)", number)
+                await client.remove_label(number, "in-review")
+                await client.add_labels(number, ["blocked"])
+                state = await _probe_orphan_state(client, project_root, number, "review")
+                await _try_comment(
+                    client,
+                    number,
+                    (
+                        f"Blocked: review agent produced no result and is no longer running "
+                        f"(interrupted or killed; dispatched > {settings.agent.timeout} ago).\n\n"
+                        f"{state}\n\nNeeds human review. See tom.log."
+                    ),
+                )
+                summary.blocked.append((number, title))
             continue
         proc, timer = entry
 
@@ -384,6 +403,25 @@ async def _step3_check_dev_progress(
 
         entry = active_processes.get(number)
         if entry is None:
+            # No live process (e.g. daemon restarted mid-agent) and no completion
+            # comment. If the dispatch is older than the agent timeout, the agent
+            # is gone — surface it as blocked rather than skip forever.
+            grace = parse_interval_seconds(settings.agent.timeout)
+            if last_dispatch and _comment_age_exceeds(last_dispatch, grace):
+                _log.warning("Step 3: #%d orphaned in-dev (no process, no completion)", number)
+                await client.remove_label(number, "in-dev")
+                await client.add_labels(number, ["blocked"])
+                state = await _probe_orphan_state(client, project_root, number, "dev")
+                await _try_comment(
+                    client,
+                    number,
+                    (
+                        f"Blocked: dev agent produced no result and is no longer running "
+                        f"(interrupted or killed; dispatched > {settings.agent.timeout} ago).\n\n"
+                        f"{state}\n\nNeeds human review. See tom.log."
+                    ),
+                )
+                summary.blocked.append((number, title))
             continue
         proc, timer = entry
 
@@ -741,6 +779,48 @@ async def _try_comment(client: GitHubClient, number: int, body: str) -> None:
         await client.create_comment(number, body)
     except Exception:
         _log.exception("Failed to post comment on #%d (continuing)", number)
+
+
+def _comment_age_exceeds(comment: dict, seconds: float) -> bool:
+    created = comment.get("created_at")
+    if not created:
+        return False
+    try:
+        ts = datetime.fromisoformat(created.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return (datetime.now(timezone.utc) - ts).total_seconds() > seconds
+
+
+async def _probe_orphan_state(
+    client: GitHubClient, project_root: str, number: int, agent_type: str
+) -> str:
+    lines: list[str] = []
+
+    try:
+        query = f"repo:{client.owner}/{client.repo} is:pr is:open #{number} in:body"
+        prs = await client.search_issues(query)
+        if prs:
+            refs = ", ".join(f"#{p['number']}" for p in prs)
+            lines.append(f"- Open PR(s) referencing this issue: {refs}")
+        else:
+            lines.append("- No open PR references this issue")
+    except Exception:
+        _log.exception("Orphan probe: PR lookup failed for #%d", number)
+        lines.append("- PR state: unknown (lookup failed)")
+
+    prefix = "dev" if agent_type == "dev" else "review"
+    worktree_dir = Path(project_root) / ".worktrees" / f"{prefix}-{number}"
+    try:
+        lines.append(
+            f"- Local worktree {worktree_dir.name}: "
+            + ("present" if worktree_dir.exists() else "absent")
+        )
+    except Exception:
+        _log.exception("Orphan probe: worktree check failed for #%d", number)
+        lines.append("- Local worktree: unknown (check failed)")
+
+    return "\n".join(lines)
 
 
 def _parse_dependencies(body: str) -> list[int]:
