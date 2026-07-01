@@ -8,6 +8,7 @@ import sys
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 
+from tom import __version__
 from tom.config import Settings, parse_interval_seconds
 
 _log = logging.getLogger("tom")
@@ -85,7 +86,7 @@ async def run_patrol_loop(
     loop.add_signal_handler(signal.SIGINT, shutdown.set)
 
     acquire_lock(settings.id, "patrol")
-    _log.info("Patrol loop started (interval: %s)", settings.patrol.interval)
+    _log.info("Tom v%s — patrol loop started (interval: %s)", __version__, settings.patrol.interval)
 
     try:
         if not run_now:
@@ -141,7 +142,7 @@ async def run_retro_loop(
     loop.add_signal_handler(signal.SIGINT, shutdown.set)
 
     acquire_lock(settings.id, "retro")
-    _log.info("Retro loop started (interval: %s, time: %s)", settings.retro.interval, settings.retro.time)
+    _log.info("Tom v%s — retro loop started (interval: %s, time: %s)", __version__, settings.retro.interval, settings.retro.time)
 
     try:
         if not run_now:
